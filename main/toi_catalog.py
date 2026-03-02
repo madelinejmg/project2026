@@ -71,3 +71,52 @@ def get_target_by_tic(
     }).reset_index(drop=True)
 
     return out
+
+def process_first_sector_targets(df: pd.DataFrame, verbose: bool = True):
+    """
+    For each TIC ID in the dataframe:
+    - Parse the 'Sectors' column
+    - Select the first listed sector
+    - Call get_target_by_tic for that TIC + sector
+    - Collect results into a list
+    
+    Returns
+    -------
+    results : list of DataFrames
+        One DataFrame per TIC (filtered to first sector)
+    """
+
+    results = []
+
+    for _, row in df.iterrows():
+
+        tic_id = int(row["TIC ID"])
+        sectors_str = row["Sectors"]
+
+        if pd.isna(sectors_str):
+            continue
+
+        try:
+            sectors = [
+                int(float(s.strip()))
+                for s in str(sectors_str).split(",")
+                if s.strip()
+            ]
+        except ValueError:
+            continue
+
+        if not sectors:
+            continue
+
+        first_sector = sectors[0]
+
+        if verbose:
+            print(f"TIC ID {tic_id}: First sector {first_sector}")
+
+        try:
+            params = get_target_by_tic(df, tic_id=tic_id, sector=first_sector)
+            results.append(params)
+        except ValueError:
+            continue
+
+    return results
