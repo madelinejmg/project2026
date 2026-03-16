@@ -22,9 +22,9 @@ pd.set_option('display.max_colwidth', None)
 # Practice with TOI-270 (3 planet system)
 #ID=259377017
 #Sector=3
-radius=3*21*u.arcsec
-cadence='30 minute'
-DOWNLOADPATH = os.getcwd() + "/HLSP/"
+radius=3*21*u.arcsec #fixed
+cadence='30 minute' #fixed
+DOWNLOADPATH = os.getcwd() + "/HSLP/"
 
 cadence_map = {
         'long': (30*u.minute , 'FFI'),
