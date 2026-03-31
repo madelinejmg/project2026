@@ -370,6 +370,10 @@ def get_tess_lc(
         
         newdf = standardize_lc(df,pipeline)
 
+        # 7) Sorting df (increasing) - helper
+        df = df.sort_values(by = 'time', ascending = True).reset_index(drop=True) # drops the old indices
+        newdf = newdf.sort_values(by = 'time', ascending = True).reset_index(drop=True) # drops the old indices
+
     return product, df, newdf
 
 
