@@ -37,8 +37,8 @@ def plot_phasefolded(ax, target, lc, color, label):
     target_Dep = target['Transit Depth Value'].item()/1e6
     target_Dur = target['Transit Duration (hours) Value'].item()
        
-    pf,ff = phasefold(T0=target_T0, time=lc['Time'].to_numpy(), 
-                      period=target_P, flux=lc['Corrected Flux'].to_numpy()/np.nanmedian(lc['Corrected Flux'].to_numpy()))
+    pf,ff = phasefold(T0=target_T0, time=lc['time'].to_numpy(), 
+                      period=target_P, flux=lc['flux_corr'].to_numpy()/np.nanmedian(lc['flux_corr'].to_numpy()))
     
     ax.scatter(24*pf,ff, s=3, color=color,label=label)
     ax.set_xlim(-5*target_Dur,5*target_Dur)

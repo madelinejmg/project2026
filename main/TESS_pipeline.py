@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Optional, Tuple, Union
-import os
-import re
+import os, sys, re
 
 import numpy as np
 import pandas as pd
@@ -20,7 +19,7 @@ pd.set_option('display.width', None)
 pd.set_option('display.max_colwidth', None)
 
 # Practice with TOI-270 (3 planet system)
-#ID=259377017
+#ID=259377017 # fixed for now
 #Sector=3
 radius=3*21*u.arcsec #fixed
 cadence='30 minute' #fixed
@@ -38,7 +37,7 @@ cadence_map = {
 if cadence not in cadence_map:
     raise ValueError(f"Unrecognised cadence: {cadence!r}")
 exp_u, ffi_or_tpf = cadence_map[cadence]
-exptime     = int(exp_u.to(u.second).value)
+exptime  = int(exp_u.to(u.second).value)
 
 def standardize_lc(
     lc: pd.DataFrame,
