@@ -206,6 +206,7 @@ def get_tess_lc(
     downloadpath: str = DEFAULT_DOWNLOADPATH,
     *,
     verbose: bool = True,
+    choose_first_timeseries: bool = True,
 ) -> Tuple[Any, pd.DataFrame]:
     """
     Download one TESS HLSP light curve (FITS) via lksearch and return it as a DataFrame.
@@ -227,6 +228,8 @@ def get_tess_lc(
         Directory where products will be downloaded.
     verbose : bool, optional (keyword-only)
         If True, prints a compact summary of matching pipelines and the selected product.
+    choose_first_timeseries : bool
+        If True, selects the earliest matching of matching pipelines.
 
     Returns
     -------
@@ -299,16 +302,80 @@ def get_tess_lc(
     # 3) Pick best row:
     #    (a) prefer rows whose target_name contains the TIC id
     #    (b) then smallest distance (closest on-sky match)
-    if "target_name" in tbl.columns:
-        pat = re.compile(rf"(^|\D){re.escape(tic_str)}(\D|$)")
-        mask = tbl["target_name"].astype(str).apply(lambda s: bool(pat.search(s)))
-        if mask.any():
-            tbl = tbl[mask]
+    # NOTE: OLD VERSION
+    # if "target_name" in tbl.columns:
+    #     pat = re.compile(rf"(^|\D){re.escape(tic_str)}(\D|$)")
+    #     mask = tbl["target_name"].astype(str).apply(lambda s: bool(pat.search(s)))
+    #     if mask.any():
+    #         tbl = tbl[mask]
 
-    if "distance" in tbl.columns:
-        tbl = tbl.sort_values("distance", ascending=True)
+    # if "distance" in tbl.columns:
+    #     tbl = tbl.sort_values("distance", ascending=True)
 
-    best_tbl = tbl.iloc[[0]].reset_index(drop=True)
+    # best_tbl = tbl.iloc[[0]].reset_index(drop=True)
+
+    # 3) Modified for choose_first_timeseries
+    # Prefer rows whose target_name contains the TIC id
+    # if "target_name" in tbl.columns:
+    #     pat = re.compile(rf"(^|\D){re.escape(tic_str)}(\D|$)")
+    #     mask = tbl["target_name"].astype(str).apply(lambda s: bool(pat.search(s)))
+    #     if mask.any():
+    #         tbl = tbl.loc[mask].copy()
+
+    # # If requested, prefer the first/earliest time-series product (v.1)
+    # if choose_first_timeseries:
+    #     if "t_min" in tbl.columns:
+    #         tbl = tbl.sort_values(["t_min", "distance"] if "distance" in tbl.columns else ["t_min"],
+    #                             ascending=True)
+    #     elif "year" in tbl.columns:
+    #         tbl = tbl.sort_values(["year", "distance"] if "distance" in tbl.columns else ["year"],
+    #                             ascending=True)
+    #     elif "description" in tbl.columns:
+    #         tbl = tbl.sort_values("description", ascending=True)
+    #     elif "distance" in tbl.columns:
+    #         tbl = tbl.sort_values("distance", ascending=True)
+    # else:
+    #     if "distance" in tbl.columns:
+    #         tbl = tbl.sort_values("distance", ascending=True)
+    
+    # best_tbl = tbl.iloc[[0]].reset_index(drop=True)
+
+##########################################################################################
+   # NOTE: v2. choose earliest or nearest product for choose_first_timeseries (4/8)
+    sort_cols = []
+    time_col_used = None
+
+    if choose_first_timeseries:
+        # Case 1: Prefer true time-like columns first (highly preferred)
+        for candidate in ["t_min", "tstart", "t_min_btjd", "start_time", "year"]:
+            if candidate in tbl.columns:
+                sort_cols.append(candidate)
+                time_col_used = candidate
+                break
+        # Case 2: What if two rows have the same t_min (or very close)? 
+        if "distance" in tbl.columns:
+            sort_cols.append("distance")
+
+        # Case 3: If none of the preferred options exist, use something else so
+        # the code doesn't break
+        if not sort_cols and "description" in tbl.columns:
+            sort_cols = ["description"]
+        elif not sort_cols and "distance" in tbl.columns:
+            sort_cols = ["distance"]
+    else:
+        if "distance" in tbl.columns:
+            sort_cols = ["distance"]
+        elif "t_min" in tbl.columns:
+            sort_cols = ["t_min"]
+
+    if sort_cols:
+        tbl = tbl.sort_values(sort_cols, ascending=True).reset_index(drop=True)
+
+    best_tbl = tbl.iloc[[0]].copy()
+    
+
+##########################################################################################
+
 
     # Create a single-row TESSSearch object so download() only pulls one file.
     product = lk.TESSSearch(table=best_tbl)
@@ -317,6 +384,9 @@ def get_tess_lc(
         cols = [c for c in ["target_name", "pipeline", "mission", "sector", "exptime", "distance", "year", "description"] if c in best_tbl.columns]
         print("Selected product row:")
         print(best_tbl[cols] if cols else best_tbl.head(1))
+
+        if choose_first_timeseries:
+            print(f"choose_first_timeseries=True; sorted using: {time_col_used}")
 
     # 4) Download
     manifest = product.download(download_dir=downloadpath)
@@ -347,7 +417,7 @@ def get_tess_lc(
                 continue
             # Prefer a named LIGHTCURVE extension if present; else first BinTable-like HDU
             extname = str(getattr(hdu, "name", "")).upper()
-            if hasattr(data, "names") and extname in {"LIGHTCURVE, LIGHTCURVES", "LC", "TIME_SERIES", "TIMESERIES"}:
+            if hasattr(data, "names") and extname in {"LIGHTCURVE", "LIGHTCURVES", "LC", "TIME_SERIES", "TIMESERIES"}:
                 table_hdu = hdu
                 break
             if table_hdu is None and hasattr(data, "names"):
@@ -370,9 +440,9 @@ def get_tess_lc(
         
         newdf = standardize_lc(df,pipeline)
 
-        # 7) Sorting df (increasing) - helper
-        df = df.sort_values(by = 'time', ascending = True).reset_index(drop=True) # drops the old indices
-        newdf = newdf.sort_values(by = 'time', ascending = True).reset_index(drop=True) # drops the old indices
+        # 7) Sorting df (increasing values) - helper
+        #df = df.sort_values(by = 'time', ascending = True).reset_index(drop=True) # drops the old indices
+        #newdf = newdf.sort_values(by = 'time', ascending = True).reset_index(drop=True) # drops the old indices
 
     return product, df, newdf
 
@@ -398,6 +468,7 @@ def collect_lightcurves_for_target(
     exptime: str = DEFAULT_CADENCE,
     apply_quality_mask: bool = True,
     verbose: bool = True,
+    choose_first_timeseries: bool = True,
 ) -> Dict[str, Dict[str, Any]]:
     """
     Download, standardize, and organize light curves from multiple TESS HLSP
@@ -460,6 +531,9 @@ def collect_lightcurves_for_target(
     verbose : bool, optional
         If True, print a short progress message before each pipeline fetch and
         allow `get_tess_lc(...)` to print its own selected-product summary.
+
+    choose_first_timeseries : bool
+        If true, prints the first time series of matching pipelines.
 
     Returns
     -------

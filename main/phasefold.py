@@ -31,15 +31,19 @@ def phasefold(T0,time,period,flux):
     return phase[ind],flux[ind]
 
 
-def plot_phasefolded(ax, target, lc, color, label):
+def plot_phasefolded(ax, target, lc, color, label, T0=None):
     target_P= target['Orbital Period (days) Value'].item()
     target_T0= target['Orbital Epoch Value'].item()
     target_Dep = target['Transit Depth Value'].item()/1e6
     target_Dur = target['Transit Duration (hours) Value'].item()
+
+    # Use corrected T0 if provided; otherwise fall back to catalog T0
+    if T0 is None:
+        T0 = target_T0
        
-    pf,ff = phasefold(T0=target_T0, time=lc['time'].to_numpy(), 
+    pf,ff = phasefold(T0=T0, time=lc['time'].to_numpy(), 
                       period=target_P, flux=lc['flux_corr'].to_numpy()/np.nanmedian(lc['flux_corr'].to_numpy()))
-    
+
     ax.scatter(24*pf,ff, s=3, color=color,label=label)
     ax.set_xlim(-5*target_Dur,5*target_Dur)
     
