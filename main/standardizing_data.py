@@ -54,42 +54,44 @@ def standardize_lc(
 
     Parameters
     ----------
-    lc : pandas.DataFrame
-        Input light-curve table from a given pipeline.
+    lc : pd.DataFrame
+        Raw light-curve table from a given pipeline.
     pipeline : str
-        Pipeline key used in the mapping (e.g., 'QLP', 'TESS-SPOC', 'TGLC', 'GSFC-ELEANOR-LITE').
+        Pipeline key (e.g. 'QLP', 'TESS-SPOC', 'TGLC', 'GSFC-ELEANOR-LITE').
     strict : bool, optional
-        If True, raise KeyError when a required mapped input column is missing.
-        If False, missing/None columns become NaN-filled outputs.
+        If True, raise KeyError on a missing required column.  Default False.
     case_insensitive : bool, optional
-        If True, allows matching input columns ignoring case.
+        Match input column names case-insensitively.  Default True.
 
     Returns
     -------
-    out : pandas.DataFrame
-        DataFrame with standardized columns in a fixed order:
-        ['Time', 'Raw Flux', 'Raw Flux Error', 'BKG Flux', 'BKG Flux Error',
-         'Corrected Flux', 'Corrected Flux Error', 'Quality']
+    out : pd.DataFrame
+        Standardized DataFrame with columns:
+        time, flux_raw, flux_raw_err, flux_corr, flux_corr_err,
+        flux_bkg, flux_bkg_err, quality, quality2.
+
+        ``quality2`` is populated only for TGLC (→ TESS_flags); all other
+        pipelines produce an all-NaN column.  Use ``quality2`` together with
+        ``quality`` when building quality masks for TGLC data.
 
     Notes
     -----
-    - Mapping is positional: the i-th old column maps to the i-th standardized column.
-    - Any `None` in the mapping produces an all-NaN output column.
+    Mapping is key-based: each schema column name maps to a raw column name
+    (or None for an all-NaN placeholder).
 
     Examples
     --------
-    >>> import pandas as pd
-    >>> df = pd.DataFrame({"time":[1.0, 2.0], "cal_psf_flux":[10.0, 11.0], "background":[0.1, 0.2], "TGLC_flags":[0, 1]})
-    >>> out = standardize_lc(df, "TGLC")
+    >>> out = standardize_lc(raw_df, "TGLC")
     >>> list(out.columns)
-    ['Time', 'Raw Flux', 'Raw Flux Error', 'BKG Flux', 'BKG Flux Error', 'Corrected Flux', 'Corrected Flux Error', 'Quality']
-    >>> float(out["Raw Flux"].iloc[0])
-    10.0
-    >>> np.isnan(out["Raw Flux Error"].iloc[0])
+    ['time', 'flux_raw', 'flux_raw_err', 'flux_corr', 'flux_corr_err',
+     'flux_bkg', 'flux_bkg_err', 'quality', 'quality2']
+    >>> out["quality2"].notna().any()   # TESS_flags populated
+    True
+    >>> out2 = standardize_lc(raw_df, "QLP")
+    >>> out2["quality2"].isna().all()   # not used for QLP
     True
     """
-    # Standard name conventions for each pipeline
-    SCHEMA_COLUMNS: Tuple[str,...] = (
+    SCHEMA_COLUMNS: Tuple[str, ...] = (
         "time",
         "flux_raw",
         "flux_raw_err",
@@ -98,75 +100,80 @@ def standardize_lc(
         "flux_bkg",
         "flux_bkg_err",
         "quality",
+        "quality2",     # secondary flag; only TGLC populates this
     )
 
-    # PIPELINE COLUMN NAMES
     PIPELINE_COLUMN_MAP: Dict[str, Dict[str, Optional[str]]] = {
         "QLP": {
-            "time": "TIME",
-            "flux_raw": "SAP_FLUX",
-            "flux_raw_err": None, 
-            "flux_corr": "KSPSAP_FLUX",
+            "time":          "TIME",
+            "flux_raw":      "SAP_FLUX",
+            "flux_raw_err":  None,
+            "flux_corr":     "KSPSAP_FLUX",
             "flux_corr_err": "KSPSAP_FLUX_ERR",
-            "flux_bkg": "SAP_BKG",
-            "flux_bkg_err": "SAP_BKG_ERR",
-            "quality": "QUALITY",
+            "flux_bkg":      "SAP_BKG",
+            "flux_bkg_err":  "SAP_BKG_ERR",
+            "quality":       "QUALITY",
+            "quality2":      None,
         },
-        "TESS-SPOC": { 
-            "time": "TIME",
-            "flux_raw": "SAP_FLUX",
-            "flux_raw_err": "SAP_FLUX_ERR",
-            "flux_corr": "PDCSAP_FLUX",
+        "TESS-SPOC": {
+            "time":          "TIME",
+            "flux_raw":      "SAP_FLUX",
+            "flux_raw_err":  "SAP_FLUX_ERR",
+            "flux_corr":     "PDCSAP_FLUX",
             "flux_corr_err": "PDCSAP_FLUX_ERR",
-            "flux_bkg": "SAP_BKG",
-            "flux_bkg_err": "SAP_BKG_ERR",
-            "quality": "QUALITY",
+            "flux_bkg":      "SAP_BKG",
+            "flux_bkg_err":  "SAP_BKG_ERR",
+            "quality":       "QUALITY",
+            "quality2":      None,
         },
         "TGLC": {
-            "time": "time",
-            "flux_raw": "aperture_flux",
-            "flux_raw_err": None,
-            "flux_corr": "cal_aper_flux",
+            "time":          "time",
+            "flux_raw":      "aperture_flux",
+            "flux_raw_err":  None,
+            "flux_corr":     "cal_aper_flux",
             "flux_corr_err": None,
-            "flux_bkg": "background",
-            "flux_bkg_err": None,
-            "quality": "TGLC_flags",
+            "flux_bkg":      "background",
+            "flux_bkg_err":  None,
+            "quality":       "TGLC_flags",
+            "quality2":      "TESS_flags",
         },
         "GSFC-ELEANOR-LITE": {
-            "time": "TIME",
-            "flux_raw": "RAW_FLUX",
-            "flux_raw_err": "FLUX_ERR",
-            "flux_corr": "PCA_FLUX",
-            "flux_corr_err": None, 
-            "flux_bkg": "FLUX_BKG",
-            "flux_bkg_err": None,
-            "quality": "QUALITY",
+            "time":          "TIME",
+            "flux_raw":      "RAW_FLUX",
+            "flux_raw_err":  "FLUX_ERR",
+            "flux_corr":     "PCA_FLUX",
+            "flux_corr_err": None,
+            "flux_bkg":      "FLUX_BKG",
+            "flux_bkg_err":  None,
+            "quality":       "QUALITY",
+            "quality2":      None,
         },
-
-        # NOTE: These are placeholders only.
         "NEMESIS": {
-            "time": "TIME",
-            "flux_raw": "RAW_FLUX",
-            "flux_raw_err": "RAW_FLUX_ERR",
-            "flux_corr": "CORR_FLUX",
+            "time":          "TIME",
+            "flux_raw":      "RAW_FLUX",
+            "flux_raw_err":  "RAW_FLUX_ERR",
+            "flux_corr":     "CORR_FLUX",
             "flux_corr_err": "CORR_FLUX_ERR",
-            "flux_bkg": "BKG_FLUX",
-            "flux_bkg_err": "BKG_FLUX_ERR",
-            "quality": "QUALITY",
+            "flux_bkg":      "BKG_FLUX",
+            "flux_bkg_err":  "BKG_FLUX_ERR",
+            "quality":       "QUALITY",
+            "quality2":      None,
         },
     }
 
     if pipeline not in PIPELINE_COLUMN_MAP:
-        raise KeyError(f"Unknown pipeline '{pipeline}'. Supported: {sorted(PIPELINE_COLUMN_MAP.keys())}")
+        raise KeyError(
+            f"Unknown pipeline '{pipeline}'. "
+            f"Supported: {sorted(PIPELINE_COLUMN_MAP.keys())}"
+        )
 
     old_cols = PIPELINE_COLUMN_MAP[pipeline]
     if len(old_cols) != len(SCHEMA_COLUMNS):
         raise ValueError(
-            f"Mapping for pipeline='{pipeline}' has {len(old_cols)} columns, "
+            f"Mapping for pipeline='{pipeline}' has {len(old_cols)} entries, "
             f"expected {len(SCHEMA_COLUMNS)}."
         )
 
-    # Build a resolver for case-insensitive matching, if requested
     if case_insensitive:
         col_lookup = {str(c).casefold(): c for c in lc.columns}
         def resolve(name: str) -> Optional[str]:
@@ -176,188 +183,141 @@ def standardize_lc(
             return name if name in lc.columns else None
 
     out = pd.DataFrame(index=lc.index)
-
     for new_name in SCHEMA_COLUMNS:
         old_name = old_cols[new_name]
         if old_name is None:
             out[new_name] = np.nan
             continue
-
         actual = resolve(old_name)
         if actual is None:
             if strict:
                 raise KeyError(
                     f"Missing column '{old_name}' for pipeline='{pipeline}'. "
-                    f"Available columns: {list(lc.columns)}"
+                    f"Available: {list(lc.columns)}"
                 )
             out[new_name] = np.nan
             continue
-
         out[new_name] = lc[actual].to_numpy(copy=False)
 
     return out
+
+
+# ---------------------------------------------------------------------------
 
 def get_tess_lc(
     TIC_ID: Union[int, str],
     pipeline: str,
     radius: u.Quantity = DEFAULT_RADIUS,
     exptime: str = DEFAULT_CADENCE,
-    Sector: Optional[Union[int, list[int]]] = None,
+    Sector: Optional[Union[int, List[int]]] = None,
     downloadpath: str = DEFAULT_DOWNLOADPATH,
     *,
     verbose: bool = True,
     choose_first_timeseries: bool = True,
-) -> Tuple[Any, pd.DataFrame]:
+    preloaded_search: Optional[Any] = None,
+) -> Tuple[Any, pd.DataFrame, pd.DataFrame]:
     """
-    Download one TESS HLSP light curve (FITS) via lksearch and return it as a DataFrame.
+    Download one TESS HLSP light curve (FITS) and return raw + standardized
+    DataFrames.
 
     Parameters
     ----------
-    TIC_ID : int | str
-        TIC identifier (e.g., 123456789).
-    radius : float | astropy.units.Quantity
-        Search radius. If float, lksearch interprets it as arcseconds. :contentReference[oaicite:4]{index=4}
-        You may also pass an explicit Quantity (e.g., 30*u.arcsec).
-    exptime : str | int | (float, float)
-        Exposure time filter passed to lksearch (e.g. "shortest", 120, (100, 500)). :contentReference[oaicite:5]{index=5}
-    Sector : int | list[int] | None
-        TESS sector(s) to filter on.
+    TIC_ID : int or str
+        TIC identifier.
     pipeline : str
-        HLSP pipeline name to filter on (e.g., "QLP", "TASOC", "TESS-SPOC", etc.). :contentReference[oaicite:6]{index=6}
+        HLSP pipeline name.
+    radius : astropy.units.Quantity
+        Cone-search radius.
+    exptime : str
+        Cadence/exptime string.
+    Sector : int, list of int, or None
+        TESS sector filter.
     downloadpath : str
-        Directory where products will be downloaded.
-    verbose : bool, optional (keyword-only)
-        If True, prints a compact summary of matching pipelines and the selected product.
+        Download directory.
+    verbose : bool
+        Print selected-product summary.
     choose_first_timeseries : bool
-        If True, selects the earliest matching of matching pipelines.
+        Sort by earliest time column before selecting best row.
+    preloaded_search : lksearch.TESSSearch or None
+        Pre-fetched ``.timeseries`` result.  When provided the MAST query is
+        skipped and this object is filtered directly by pipeline.  Pass from
+        ``collect_lightcurves_for_target`` to avoid redundant network calls.
 
     Returns
     -------
-    product : lksearch.TESSSearch (single-row)
-        A TESSSearch object containing exactly one selected product row.
-    df : pandas.DataFrame
-        Light curve table from the first table-like FITS extension.
-
-    Raises
-    ------
-    ValueError
-        If no matching HLSP timeseries products are found for the requested pipeline.
+    product : lksearch.TESSSearch
+        Single-row search object for the selected product.
+    raw_df : pd.DataFrame
+        Raw light-curve table from FITS.
+    std_df : pd.DataFrame
+        Standardized light-curve DataFrame.
     """
     os.makedirs(downloadpath, exist_ok=True)
 
     tic_str = str(TIC_ID).strip()
-    # Normalize "123.0" -> "123" if user passed a float-like string
     try:
         tic_str = str(int(float(tic_str)))
     except Exception:
         pass
-    
-    # lksearch treats float search_radius as arcseconds by default. :contentReference[oaicite:7]{index=7}
-    search_radius = float(radius) if isinstance(radius, (int, float, np.floating)) else radius
 
-    # 1) Query
-    search = lk.TESSSearch(
-        target=f"TIC {tic_str}",
-        search_radius=search_radius,
-        exptime=exptime,
-        sector=Sector,
-        hlsp=True,
+    search_radius = (
+        float(radius) if isinstance(radius, (int, float, np.floating)) else radius
     )
-    # 2) Restrict to time-series products, then filter to HLSP + pipeline
-    try:
-        ts = search.timeseries
-    except:
-        # Very defensive fallback; docs/tutorials show .timeseries exists. :contentReference[oaicite:8]{index=8}
-        ts = search
-    
-    # Filter to HLSP + pipeline (and keep exptime/sector constraints via ctor inputs)
+
+    # ── MAST query (skipped when caller supplies a preloaded search) ──────────
+    if preloaded_search is not None:
+        ts = preloaded_search
+    else:
+        search = lk.TESSSearch(
+            target=f"TIC {tic_str}",
+            search_radius=search_radius,
+            exptime=exptime,
+            sector=Sector,
+            hlsp=True,
+        )
+        try:
+            ts = search.timeseries
+        except Exception:
+            ts = search
+
+    # ── Filter to pipeline ────────────────────────────────────────────────────
     filtered = ts.filter_table(mission="HLSP", pipeline=pipeline)
 
     if filtered.table is None or len(filtered.table) == 0:
-        # Build helpful debug context from whatever we *did* get back
         table = getattr(ts, "table", None)
         if isinstance(table, pd.DataFrame) and len(table) > 0:
-            if "mission" in table.columns:
-                hlsp_tbl = table[table["mission"].astype(str).eq("HLSP")]
-            else:
-                hlsp_tbl = table
-
+            hlsp_tbl = (
+                table[table["mission"].astype(str).eq("HLSP")]
+                if "mission" in table.columns else table
+            )
             avail = (
                 np.unique(hlsp_tbl["pipeline"].astype(str))
                 if "pipeline" in hlsp_tbl.columns and len(hlsp_tbl) > 0
                 else np.array([])
             )
             raise ValueError(
-                f"No HLSP timeseries product found for pipeline='{pipeline}' "
-                f"(TIC={tic_str}, sector={Sector}, exptime={exptime}, radius={radius}). "
-                f"Available HLSP pipelines: {avail.tolist()}"
+                f"No HLSP product for pipeline='{pipeline}' "
+                f"(TIC={tic_str}, sector={Sector}, exptime={exptime}). "
+                f"Available: {avail.tolist()}"
             )
-
         raise ValueError(
-            f"No products returned at all for TIC={tic_str}, sector={Sector}, exptime={exptime}, radius={radius}."
+            f"No products for TIC={tic_str}, sector={Sector}, exptime={exptime}."
         )
 
     tbl = filtered.table.copy()
 
-    # 3) Pick best row:
-    #    (a) prefer rows whose target_name contains the TIC id
-    #    (b) then smallest distance (closest on-sky match)
-    # NOTE: OLD VERSION
-    # if "target_name" in tbl.columns:
-    #     pat = re.compile(rf"(^|\D){re.escape(tic_str)}(\D|$)")
-    #     mask = tbl["target_name"].astype(str).apply(lambda s: bool(pat.search(s)))
-    #     if mask.any():
-    #         tbl = tbl[mask]
-
-    # if "distance" in tbl.columns:
-    #     tbl = tbl.sort_values("distance", ascending=True)
-
-    # best_tbl = tbl.iloc[[0]].reset_index(drop=True)
-
-    # 3) Modified for choose_first_timeseries
-    # Prefer rows whose target_name contains the TIC id
-    # if "target_name" in tbl.columns:
-    #     pat = re.compile(rf"(^|\D){re.escape(tic_str)}(\D|$)")
-    #     mask = tbl["target_name"].astype(str).apply(lambda s: bool(pat.search(s)))
-    #     if mask.any():
-    #         tbl = tbl.loc[mask].copy()
-
-    # # If requested, prefer the first/earliest time-series product (v.1)
-    # if choose_first_timeseries:
-    #     if "t_min" in tbl.columns:
-    #         tbl = tbl.sort_values(["t_min", "distance"] if "distance" in tbl.columns else ["t_min"],
-    #                             ascending=True)
-    #     elif "year" in tbl.columns:
-    #         tbl = tbl.sort_values(["year", "distance"] if "distance" in tbl.columns else ["year"],
-    #                             ascending=True)
-    #     elif "description" in tbl.columns:
-    #         tbl = tbl.sort_values("description", ascending=True)
-    #     elif "distance" in tbl.columns:
-    #         tbl = tbl.sort_values("distance", ascending=True)
-    # else:
-    #     if "distance" in tbl.columns:
-    #         tbl = tbl.sort_values("distance", ascending=True)
-    
-    # best_tbl = tbl.iloc[[0]].reset_index(drop=True)
-
-##########################################################################################
-   # NOTE: v2. choose earliest or nearest product for choose_first_timeseries (4/8)
+    # ── Select best row ───────────────────────────────────────────────────────
     sort_cols = []
     time_col_used = None
 
     if choose_first_timeseries:
-        # Case 1: Prefer true time-like columns first (highly preferred)
         for candidate in ["t_min", "tstart", "t_min_btjd", "start_time", "year"]:
             if candidate in tbl.columns:
                 sort_cols.append(candidate)
                 time_col_used = candidate
                 break
-        # Case 2: What if two rows have the same t_min (or very close)? 
         if "distance" in tbl.columns:
             sort_cols.append("distance")
-
-        # Case 3: If none of the preferred options exist, use something else so
-        # the code doesn't break
         if not sort_cols and "description" in tbl.columns:
             sort_cols = ["description"]
         elif not sort_cols and "distance" in tbl.columns:
@@ -372,79 +332,69 @@ def get_tess_lc(
         tbl = tbl.sort_values(sort_cols, ascending=True).reset_index(drop=True)
 
     best_tbl = tbl.iloc[[0]].copy()
-    
-
-##########################################################################################
-
-
-    # Create a single-row TESSSearch object so download() only pulls one file.
-    product = lk.TESSSearch(table=best_tbl)
+    product  = lk.TESSSearch(table=best_tbl)
 
     if verbose:
-        cols = [c for c in ["target_name", "pipeline", "mission", "sector", "exptime", "distance", "year", "description"] if c in best_tbl.columns]
+        cols = [c for c in
+                ["target_name", "pipeline", "mission", "sector",
+                 "exptime", "distance", "year", "description"]
+                if c in best_tbl.columns]
         print("Selected product row:")
         print(best_tbl[cols] if cols else best_tbl.head(1))
-
         if choose_first_timeseries:
             print(f"choose_first_timeseries=True; sorted using: {time_col_used}")
 
-    # 4) Download
+    # ── Download ──────────────────────────────────────────────────────────────
     manifest = product.download(download_dir=downloadpath)
-
-    # 5) Extract local path robustly
     if not isinstance(manifest, pd.DataFrame) or len(manifest) == 0:
-        raise ValueError("Download returned an empty manifest; nothing was downloaded.")
+        raise ValueError("Download returned an empty manifest.")
 
-    # lksearch manifest uses 'Local Path' in tutorials. :contentReference[oaicite:9]{index=9}
     path_col = None
     for c in manifest.columns:
-        canon = c.lower().replace(" ", "").replace("_", "")
-        if canon in {"localpath"}:
+        if c.lower().replace(" ", "").replace("_", "") == "localpath":
             path_col = c
             break
-
     if path_col is None:
-        raise ValueError(f"Could not find Local Path column in manifest. Columns: {list(manifest.columns)}")
-
+        raise ValueError(
+            f"No Local Path column in manifest. Columns: {list(manifest.columns)}"
+        )
     local_path = str(manifest[path_col].iloc[0])
 
-    # 6) Read FITS, grab first table-like extension, convert to DataFrame
+    # ── Read FITS ─────────────────────────────────────────────────────────────
     with fits.open(local_path, memmap=False) as hdul:
         table_hdu = None
         for hdu in hdul[1:]:
-            data = getattr(hdu, "data", None)
+            data    = getattr(hdu, "data", None)
+            extname = str(getattr(hdu, "name", "")).upper()
             if data is None:
                 continue
-            # Prefer a named LIGHTCURVE extension if present; else first BinTable-like HDU
-            extname = str(getattr(hdu, "name", "")).upper()
-            if hasattr(data, "names") and extname in {"LIGHTCURVE", "LIGHTCURVES", "LC", "TIME_SERIES", "TIMESERIES"}:
+            if hasattr(data, "names") and extname in {
+                "LIGHTCURVE", "LIGHTCURVES", "LC", "TIME_SERIES", "TIMESERIES"
+            }:
                 table_hdu = hdu
                 break
             if table_hdu is None and hasattr(data, "names"):
                 table_hdu = hdu
-        
-        if table_hdu is None:
-            raise ValueError(f"No table-like FITS extension found in fike: {local_path}")
-        
-        rec = np.array(table_hdu.data)
 
-        # Ensure native endianness (handles some FITS tables cleanly)
+        if table_hdu is None:
+            raise ValueError(f"No table-like FITS extension in: {local_path}")
+
+        rec = np.array(table_hdu.data)
         if hasattr(rec.dtype, "isnative") and not rec.dtype.isnative:
             try:
                 rec = rec.byteswap().newbyteorder()
             except AttributeError:
-                # numpy>=2 compatibility path for newbyteorder changes
                 rec = rec.byteswap().view(rec.dtype.newbyteorder("="))
 
-        df = pd.DataFrame.from_records(rec)
-        
-        newdf = standardize_lc(df,pipeline)
+        raw_df = pd.DataFrame.from_records(rec)
+        std_df = standardize_lc(raw_df, pipeline)
 
-        # 7) Sorting df (increasing values) - helper
-        #df = df.sort_values(by = 'time', ascending = True).reset_index(drop=True) # drops the old indices
-        #newdf = newdf.sort_values(by = 'time', ascending = True).reset_index(drop=True) # drops the old indices
+    return product, raw_df, std_df
 
-    return product, df, newdf
+
+# ---------------------------------------------------------------------------
+
+
 
 
 # NOTE: Generate N distinct colors for plots!
@@ -458,6 +408,162 @@ def _get_colors(num_colors):
     return colors
 
 # Multi-pipeline wrapper 
+# ---------------------------------------------------------------------------
+# New helper: per-sector flux normalization
+# ---------------------------------------------------------------------------
+
+def normalize_standardized_lc(std_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalize all flux columns in a standardized LC DataFrame by their
+    per-sector nanmedian so that each flux type has a baseline of ~1.0.
+
+    Each flux column is divided by ``nanmedian`` of that column's finite
+    values.  The corresponding error column is divided by the **same**
+    median (preserving the signal-to-noise ratio).  Background flux is
+    normalized independently.
+
+    Normalization pairs
+    -------------------
+    ``flux_raw``  / ``flux_raw_err``   → divided by ``nanmedian(flux_raw)``
+    ``flux_corr`` / ``flux_corr_err``  → divided by ``nanmedian(flux_corr)``
+    ``flux_bkg``  / ``flux_bkg_err``   → divided by ``nanmedian(flux_bkg)``
+
+    Columns ``time`` and ``quality`` are left untouched.
+
+    Parameters
+    ----------
+    std_df : pd.DataFrame
+        Standardized DataFrame from ``standardize_lc``.  Expected columns:
+        ``time``, ``flux_raw``, ``flux_raw_err``, ``flux_corr``,
+        ``flux_corr_err``, ``flux_bkg``, ``flux_bkg_err``, ``quality``.
+
+    Returns
+    -------
+    out : pd.DataFrame
+        Copy of ``std_df`` with flux/error columns normalized in-place.
+        Returns the input unchanged if a median is zero, non-finite, or the
+        column is absent (safe no-op).
+
+    Notes
+    -----
+    - Normalization is computed only from finite values to guard against
+      NaN-dominated columns (common for pipelines that do not populate
+      certain flux types).
+    - A median of exactly 0.0 is treated as invalid and that pair is skipped.
+    - This function must be applied **per sector** before concatenation;
+      applying it to an already-concatenated multi-sector LC would
+      normalize across the joint baseline, defeating the purpose.
+
+    Examples
+    --------
+    >>> std_df = standardize_lc(raw_df, "QLP")
+    >>> std_norm = normalize_standardized_lc(std_df)
+    >>> float(np.nanmedian(std_norm["flux_corr"]))   # ≈ 1.0
+    1.0
+    """
+    NORM_PAIRS = [
+        ("flux_raw",  "flux_raw_err"),
+        ("flux_corr", "flux_corr_err"),
+        ("flux_bkg",  "flux_bkg_err"),
+    ]
+
+    out = std_df.copy()
+
+    for flux_col, err_col in NORM_PAIRS:
+        if flux_col not in out.columns:
+            continue
+
+        vals = out[flux_col].to_numpy(dtype=float)
+        finite_vals = vals[np.isfinite(vals)]
+
+        if finite_vals.size == 0:
+            continue  # entire column is NaN — nothing to normalize
+
+        median = np.nanmedian(finite_vals)
+
+        if not np.isfinite(median) or median == 0.0:
+            continue  # degenerate; leave column as-is
+
+        out[flux_col] = out[flux_col] / median
+
+        if err_col in out.columns:
+            out[err_col] = out[err_col] / median
+
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Full replacement: collect_lightcurves_for_target
+# (only change: normalize_standardized_lc called after standardize_lc)
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+
+def _apply_quality_mask(std_df: pd.DataFrame, pipeline: str = "") -> pd.DataFrame:
+    """
+    Apply a quality mask to a standardized LC DataFrame and validate the result.
+
+    Mask logic
+    ----------
+    - All pipelines : ``quality == 0``
+    - TGLC          : ``quality == 0`` AND ``quality2 == 0``
+
+    ``quality2`` NaN values (non-TGLC pipelines) are filled with 0 so they
+    pass the secondary check unconditionally.
+
+    Parameters
+    ----------
+    std_df : pd.DataFrame
+        Normalized, standardized LC with at least a ``quality`` column.
+    pipeline : str, optional
+        Pipeline name used in error messages only.
+
+    Returns
+    -------
+    masked : pd.DataFrame
+        Subset of ``std_df`` where all quality flags are zero, index reset.
+
+    Raises
+    ------
+    ValueError
+        If any non-zero ``quality`` or ``quality2`` rows survive the mask.
+
+    Examples
+    --------
+    >>> masked = _apply_quality_mask(std_df, pipeline="TGLC")
+    >>> (masked["quality"]  == 0).all()
+    True
+    >>> (masked["quality2"] == 0).all()
+    True
+    """
+    q_mask = std_df["quality"] == 0
+
+    if "quality2" in std_df.columns:
+        q2 = pd.to_numeric(std_df["quality2"], errors="coerce").fillna(0)
+        q_mask = q_mask & (q2 == 0)
+
+    masked = std_df.loc[q_mask].reset_index(drop=True)
+
+    # ── Validation ────────────────────────────────────────────────────────────
+    bad_q = int((masked["quality"] != 0).sum())
+    if bad_q:
+        raise ValueError(
+            f"[{pipeline}] _apply_quality_mask: {bad_q} non-zero 'quality' "
+            f"rows survived the mask — check flag values."
+        )
+
+    if "quality2" in masked.columns:
+        q2_check = pd.to_numeric(masked["quality2"], errors="coerce").fillna(0)
+        bad_q2 = int((q2_check != 0).sum())
+        if bad_q2:
+            raise ValueError(
+                f"[{pipeline}] _apply_quality_mask: {bad_q2} non-zero 'quality2' "
+                f"rows survived the mask — check TESS_flags values."
+            )
+
+    return masked
+
+
 def collect_lightcurves_for_target(
     tic_id: Union[int, str],
     sector: int,
@@ -471,171 +577,100 @@ def collect_lightcurves_for_target(
     choose_first_timeseries: bool = True,
 ) -> Dict[str, Dict[str, Any]]:
     """
-    Download, standardize, and organize light curves from multiple TESS HLSP
-    pipelines for one target star in one TESS sector.
+    Download, standardize, and normalize light curves from multiple TESS HLSP
+    pipelines for one target in one sector.
 
-    This is a convenience wrapper around `get_tess_lc(...)`. For each requested
-    pipeline, the function attempts to:
+    Issues a **single** ``lk.TESSSearch`` call shared across all pipelines,
+    then filters per pipeline before downloading.  Reduces MAST round-trips
+    from N_pipelines to 1.
 
-    1. Search for the target in the requested sector and cadence
-    2. Download the selected HLSP light-curve FITS product
-    3. Read the raw light-curve table into a pandas DataFrame
-    4. Standardize the raw table into the common schema used by this project
-    5. Optionally create a quality-masked standardized light curve
-       (`quality == 0`)
+    Quality masking is pipeline-aware:
 
-    The function never stops the full multi-pipeline run just because one
-    pipeline fails. Instead, it records the failure and continues to the next
-    pipeline. This makes it useful for large comparison runs where some
-    pipelines may be missing data for a given TIC/sector combination.
+    - All pipelines: ``quality == 0``
+    - TGLC only:     ``quality == 0`` AND ``quality2 == 0``
+      (i.e. both TGLC_flags and TESS_flags must be zero)
+
+    The mask is applied to the already-normalized standardized DataFrame so
+    both ``standardized`` and ``standardized_masked`` share the same
+    fractional-flux baseline.
 
     Parameters
     ----------
     tic_id : int or str
-        TIC identifier of the target star. This is passed directly into
-        `get_tess_lc(...)` and may be given as an integer or string.
-
+        TIC identifier.
     sector : int
-        TESS sector to search. This wrapper is written for one sector at a
-        time. If you want to run across many sectors, call this function inside
-        a loop over sector numbers.
-
+        TESS sector.
     pipelines : list of str
-        List of pipeline names to try, for example:
-        `["QLP", "TESS-SPOC", "TGLC", "GSFC-ELEANOR-LITE"]`.
-
-        Each name is passed directly to `get_tess_lc(...)` and must match a
-        pipeline name supported by your ingestion code.
-
+        Pipeline names.
     downloadpath : str, optional
-        Directory where downloaded HLSP files should be stored.
-        Defaults to `DEFAULT_DOWNLOADPATH`.
-
+        Download directory.
     radius : astropy.units.Quantity, optional
-        Search radius passed to `get_tess_lc(...)`.
-        Defaults to `DEFAULT_RADIUS`.
-
+        Cone-search radius.
     exptime : str, optional
-        Exposure-time / cadence selection passed to `get_tess_lc(...)`.
-        Defaults to `DEFAULT_CADENCE`.
-
+        Cadence/exptime string.
     apply_quality_mask : bool, optional
-        If True, also create a masked standardized light curve using only rows
-        with `quality == 0`.
-
-        If False, the `"standardized_masked"` entry is set to None.
-
-        This masking is applied only to the standardized light curve, not the
-        raw light curve.
-
+        Produce ``standardized_masked``.  Default True.
     verbose : bool, optional
-        If True, print a short progress message before each pipeline fetch and
-        allow `get_tess_lc(...)` to print its own selected-product summary.
-
-    choose_first_timeseries : bool
-        If true, prints the first time series of matching pipelines.
+        Print progress.  Default True.
+    choose_first_timeseries : bool, optional
+        Select earliest time-series product.  Default True.
 
     Returns
     -------
     results : dict
-        Dictionary keyed by pipeline name. Each entry is itself a dictionary
-        with the following fields:
-
-        - `"product"` :
-            The single-row `lksearch.TESSSearch` object returned by
-            `get_tess_lc(...)`, or None if the pipeline failed.
-
-        - `"raw"` :
-            Raw pandas DataFrame read directly from the FITS table, or None if
-            the pipeline failed.
-
-        - `"standardized"` :
-            Standardized pandas DataFrame with the project schema
-            (`time`, `flux_raw`, `flux_raw_err`, `flux_corr`,
-            `flux_corr_err`, `flux_bkg`, `flux_bkg_err`, `quality`),
-            or None if the pipeline failed.
-
-        - `"standardized_masked"` :
-            If `apply_quality_mask=True`, a filtered version of the
-            standardized light curve containing only rows with `quality == 0`,
-            with the index reset. If masking is disabled or the pipeline
-            failed, this is None.
-
-        - `"tic_id"` :
-            The TIC identifier used for the query.
-
-        - `"sector"` :
-            The sector used for the query.
-
-        - `"pipeline"` :
-            The pipeline name for that entry.
-
-        - `"n_raw"` :
-            Number of rows in the raw light curve, or None if failed.
-
-        - `"n_standardized"` :
-            Number of rows in the standardized light curve, or None if failed.
-
-        - `"n_masked"` :
-            Number of rows in the masked standardized light curve if masking is
-            enabled, otherwise None.
-
-        - `"status"` :
-            `"ok"` if the pipeline completed successfully, otherwise `"failed"`.
-
-        - `"error"` :
-            None if successful, otherwise the exception message as a string.
-
-    Notes
-    -----
-    - This function is designed for bookkeeping across pipelines.
-    - It does not compute vetting metrics by itself.
-    - It is useful as the ingestion layer for building a unified results table
-      with one row per `(tic_id, sector, pipeline)`.
-    - Rows in `"standardized_masked"` are reset with `drop=True` so the masked
-      table starts at index 0.
+        Pipeline-keyed dict with keys: ``product``, ``raw``,
+        ``standardized``, ``standardized_masked``, ``tic_id``, ``sector``,
+        ``pipeline``, ``n_raw``, ``n_standardized``, ``n_masked``,
+        ``status``, ``error``.
 
     Examples
     --------
-    >>> pipelines = ["QLP", "TESS-SPOC", "TGLC", "GSFC-ELEANOR-LITE"]
     >>> results = collect_lightcurves_for_target(
-    ...     tic_id=259377017,
-    ...     sector=3,
-    ...     pipelines=pipelines,
-    ...     verbose=True
+    ...     tic_id=259377017, sector=3,
+    ...     pipelines=["QLP", "TESS-SPOC", "TGLC", "GSFC-ELEANOR-LITE"],
     ... )
-    >>> results["QLP"]["status"]
+    >>> results["TGLC"]["status"]
     'ok'
-    >>> results["QLP"]["standardized"].head()
-    >>> results["QLP"]["standardized_masked"].head()
-
-    Example of checking which pipelines succeeded:
-
-    >>> for p in results:
-    ...     print(p, results[p]["status"], results[p]["error"])
-
-    Example of building one summary row per pipeline:
-
-    >>> rows = []
-    >>> for p, info in results.items():
-    ...     rows.append({
-    ...         "tic_id": info["tic_id"],
-    ...         "sector": info["sector"],
-    ...         "pipeline": info["pipeline"],
-    ...         "status": info["status"],
-    ...         "error": info["error"],
-    ...         "n_raw": info["n_raw"],
-    ...         "n_standardized": info["n_standardized"],
-    ...         "n_masked": info["n_masked"],
-    ...     })
-    >>> summary_df = pd.DataFrame(rows)
+    >>> # Both TGLC flag columns used for masking:
+    >>> (results["TGLC"]["standardized_masked"]["quality"]  == 0).all()
+    True
+    >>> (results["TGLC"]["standardized_masked"]["quality2"] == 0).all()
+    True
     """
+    tic_str = str(tic_id).strip()
+    try:
+        tic_str = str(int(float(tic_str)))
+    except Exception:
+        pass
+
+    search_radius = (
+        float(radius) if isinstance(radius, (int, float, np.floating)) else radius
+    )
+
+    # ── Single MAST query shared across all pipelines ─────────────────────────
+    if verbose:
+        print(f"[collect] TESSSearch TIC {tic_str}, sector {sector}, "
+              f"exptime={exptime!r}  (1 query for {len(pipelines)} pipelines)")
+
+    search = lk.TESSSearch(
+        target=f"TIC {tic_str}",
+        search_radius=search_radius,
+        exptime=exptime,
+        sector=sector,
+        hlsp=True,
+    )
+    try:
+        ts = search.timeseries
+    except Exception:
+        ts = search
+
+    # ── Per-pipeline: filter → download → standardize → normalize → mask ──────
     results: Dict[str, Dict[str, Any]] = {}
 
     for pipeline in pipelines:
         try:
             if verbose:
-                print(f"Fetching {pipeline} for TIC {tic_id}, sector {sector}")
+                print(f"  [{pipeline}] downloading ...")
 
             product, raw_df, std_df = get_tess_lc(
                 TIC_ID=tic_id,
@@ -645,50 +680,46 @@ def collect_lightcurves_for_target(
                 Sector=sector,
                 downloadpath=downloadpath,
                 verbose=verbose,
+                choose_first_timeseries=choose_first_timeseries,
+                preloaded_search=ts,
             )
 
+            std_df = normalize_standardized_lc(std_df)
+
             if apply_quality_mask:
-                if "quality" not in std_df.columns:
-                    raise KeyError(
-                        f"Standardized light curve for pipeline '{pipeline}' "
-                        "does not contain a 'quality' column."
-                    )
-                std_masked_df = (
-                    std_df.loc[std_df["quality"] == 0]
-                    .reset_index(drop=True)
-                )
+                std_masked_df = _apply_quality_mask(std_df, pipeline=pipeline)
             else:
                 std_masked_df = None
 
             results[pipeline] = {
-                "product": product,
-                "raw": raw_df,
-                "standardized": std_df,
+                "product":             product,
+                "raw":                 raw_df,
+                "standardized":        std_df,
                 "standardized_masked": std_masked_df,
-                "tic_id": tic_id,
-                "sector": sector,
-                "pipeline": pipeline,
-                "n_raw": len(raw_df),
-                "n_standardized": len(std_df),
-                "n_masked": len(std_masked_df) if std_masked_df is not None else None,
-                "status": "ok",
-                "error": None,
+                "tic_id":              tic_id,
+                "sector":              sector,
+                "pipeline":            pipeline,
+                "n_raw":               len(raw_df),
+                "n_standardized":      len(std_df),
+                "n_masked":            len(std_masked_df) if std_masked_df is not None else None,
+                "status":              "ok",
+                "error":               None,
             }
 
-        except Exception as e:
+        except Exception as exc:
             results[pipeline] = {
-                "product": None,
-                "raw": None,
-                "standardized": None,
+                "product":             None,
+                "raw":                 None,
+                "standardized":        None,
                 "standardized_masked": None,
-                "tic_id": tic_id,
-                "sector": sector,
-                "pipeline": pipeline,
-                "n_raw": None,
-                "n_standardized": None,
-                "n_masked": None,
-                "status": "failed",
-                "error": str(e),
+                "tic_id":              tic_id,
+                "sector":              sector,
+                "pipeline":            pipeline,
+                "n_raw":               None,
+                "n_standardized":      None,
+                "n_masked":            None,
+                "status":              "failed",
+                "error":               str(exc),
             }
 
     return results
