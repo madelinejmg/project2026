@@ -4,4 +4,5 @@ How do automated planet-vetting tools perform when applied to light curves produ
 
 
 Link to Dax's Google Drive (where data is stored as a .zip file. Zip file ~ but uncompressed, the data is ~ 40 GB!!):
-[[This is an external link to genome.gov](https://drive.google.com/drive/folders/1dE2YAE-RhTm0Ip1IXbZDaeAFX6Vmw2HA?usp=sharing)]([https://www.genome.gov/](https://drive.google.com/drive/folders/1dE2YAE-RhTm0Ip1IXbZDaeAFX6Vmw2HA?usp=sharing))
+[https://drive.google.com/drive/folders/1dE2YAE-RhTm0Ip1IXbZDaeAFX6Vmw2HA?usp=sharing](https://drive.google.com/drive/folders/1dE2YAE-RhTm0Ip1IXbZDaeAFX6Vmw2HA?usp=sharing)
+
