@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, asdict
 from typing import Any, Optional, Union, Tuple, Dict, List
-import os, re
+import os, re, json
 
 import numpy as np
 import pandas as pd
@@ -10,6 +10,7 @@ import colorsys
 import astropy.units as u
 from astropy.io import fits
 import lksearch as lk
+import lksearch as _lk
 
 pd.set_option('display.max_rows', None)
 pd.set_option('display.max_columns', None)
@@ -22,6 +23,9 @@ pd.set_option('display.max_colwidth', None)
 DEFAULT_RADIUS = 3 * 21 * u.arcsec
 DEFAULT_CADENCE = "30 minute"
 DEFAULT_DOWNLOADPATH = os.getcwd() + "/HLSP/"
+
+# Module-level constant
+_CACHE_INDEX_FILENAME = "hlsp_fits_cache.json"
 
 cadence_map = {
         'long': (30*u.minute , 'FFI'),
@@ -38,7 +42,123 @@ if DEFAULT_CADENCE not in cadence_map:
 exp_u, ffi_or_tpf = cadence_map[DEFAULT_CADENCE]
 exptime  = int(exp_u.to(u.second).value)
 
-# 1) Helpfer fucntion to download and standardize outputs from various TESS HLSP pipelines
+
+# Cache helpers
+def _load_fits_cache(downloadpath: str) -> Dict[str, str]:
+    """
+    Load the local FITS cache index from ``{downloadpath}/hlsp_fits_cache.json``.
+
+    Returns an empty dict if the file does not yet exist.
+
+    Parameters
+    ----------
+    downloadpath : str
+        Directory where HLSP files are (or will be) stored.
+
+    Returns
+    -------
+    index : dict
+        Mapping of cache_key (str) -> absolute local file path (str).
+
+    Examples
+    --------
+    >>> idx = _load_fits_cache("/data/HLSP")
+    >>> idx.get("259377017__QLP__3__30_minute")
+    '/data/HLSP/mastDownload/HLSP/.../file.fits'
+    """
+    index_path = os.path.join(downloadpath, _CACHE_INDEX_FILENAME)
+    if os.path.exists(index_path):
+        with open(index_path, "r") as fh:
+            return json.load(fh)
+    return {}
+
+
+def _update_fits_cache(downloadpath: str, key: str, local_path: str) -> None:
+    """
+    Add or update one entry in the FITS cache index and write it to disk.
+
+    Parameters
+    ----------
+    downloadpath : str
+        Directory where the cache index lives.
+    key : str
+        Cache key for this product (see ``_build_fits_cache_key``).
+    local_path : str
+        Absolute path to the downloaded FITS file.
+
+    Examples
+    --------
+    >>> _update_fits_cache("/data/HLSP", "259377017__QLP__3__30_minute",
+    ...                    "/data/HLSP/mastDownload/HLSP/qlp.fits")
+    """
+    os.makedirs(downloadpath, exist_ok=True)
+    index = _load_fits_cache(downloadpath)
+    index[key] = local_path
+    index_path = os.path.join(downloadpath, _CACHE_INDEX_FILENAME)
+    with open(index_path, "w") as fh:
+        json.dump(index, fh, indent=2)
+
+
+def _build_fits_cache_key(
+    best_tbl: pd.DataFrame,
+    tic_str: str,
+    pipeline: str,
+    exptime: str,
+) -> str:
+    """
+    Build a deterministic cache key for a single HLSP product.
+
+    Strategy (priority order):
+    1. Use ``dataURI`` / ``obs_id`` / ``productFilename`` from the product table
+       — these are MAST-assigned unique identifiers.
+    2. Fall back to ``(tic_str, pipeline, sector, exptime)`` constructed from
+       the selected product row.
+
+    Parameters
+    ----------
+    best_tbl : pd.DataFrame
+        Single-row product table as selected inside ``get_tess_lc``.
+    tic_str : str
+        Normalised TIC identifier string (no leading zeros or ".0").
+    pipeline : str
+        HLSP pipeline name.
+    exptime : str
+        Cadence/exposure-time string (e.g. ``"30 minute"``).
+
+    Returns
+    -------
+    key : str
+        Cache key string safe for use as a JSON dict key.
+
+    Examples
+    --------
+    >>> key = _build_fits_cache_key(best_tbl, "259377017", "QLP", "30 minute")
+    >>> key
+    '259377017__QLP__3__30_minute'
+    """
+    # Attempt to derive key from MAST product-level identifiers first
+    for uri_col in ("dataURI", "dataurl", "obs_id", "obsid", "productFilename"):
+        for col in best_tbl.columns:
+            if col.lower().replace("_", "") == uri_col.lower().replace("_", ""):
+                val = str(best_tbl[col].iloc[0]).strip()
+                if val and val.lower() not in {"nan", "none", ""}:
+                    # Sanitise for use as a JSON key (no path separators)
+                    safe = val.replace("/", "__").replace("\\", "__")
+                    return safe
+
+    # Fallback: construct from (tic, pipeline, sector, exptime)
+    sector_val = "None"
+    for s_col in ("sector", "sequence_number", "year"):
+        if s_col in best_tbl.columns:
+            raw = str(best_tbl[s_col].iloc[0]).strip()
+            if raw.lower() not in {"nan", "none", ""}:
+                sector_val = raw
+                break
+
+    safe_exptime = exptime.replace(" ", "_")
+    return f"{tic_str}__{pipeline}__{sector_val}__{safe_exptime}"
+
+# 1) Download and standardize outputs from various TESS HLSP pipelines
 def standardize_lc(
     lc: pd.DataFrame,
     pipeline: str,
@@ -197,6 +317,7 @@ def standardize_lc(
 
     return out
 
+# full replacement with caching helper functions
 def get_tess_lc(
     TIC_ID: Union[int, str],
     pipeline: str,
@@ -207,55 +328,79 @@ def get_tess_lc(
     *,
     verbose: bool = True,
     choose_first_timeseries: bool = True,
-) -> Tuple[Any, pd.DataFrame]:
+    use_cache: bool = True,
+) -> Tuple[Any, pd.DataFrame, pd.DataFrame]:
     """
-    Download one TESS HLSP light curve (FITS) via lksearch and return it as a DataFrame.
+    Download one TESS HLSP light curve (FITS) via lksearch and return it 
+    as a pair of DataFrames (raw, standardized). Previously downloaded
+    products are served from a local JSON-backed cache — the FITS file is
+    not re-fetched as long as it still exists on disk.
 
     Parameters
     ----------
     TIC_ID : int | str
         TIC identifier (e.g., 123456789).
+    pipeline : str
+        HLSP pipeline name to filter on (e.g., "QLP", "TASOC", "TESS-SPOC", etc.)
     radius : float | astropy.units.Quantity
-        Search radius. If float, lksearch interprets it as arcseconds. :contentReference[oaicite:4]{index=4}
-        You may also pass an explicit Quantity (e.g., 30*u.arcsec).
-    exptime : str | int | (float, float)
-        Exposure time filter passed to lksearch (e.g. "shortest", 120, (100, 500)). :contentReference[oaicite:5]{index=5}
+        Cone-search radius
+    exptime : str 
+        Exposure-time / cadence key (e.g. ``"30 minute"``).
     Sector : int | list[int] | None
         TESS sector(s) to filter on.
-    pipeline : str
-        HLSP pipeline name to filter on (e.g., "QLP", "TASOC", "TESS-SPOC", etc.). :contentReference[oaicite:6]{index=6}
+    
     downloadpath : str
         Directory where products will be downloaded.
-    verbose : bool, optional (keyword-only)
-        If True, prints a compact summary of matching pipelines and the selected product.
+    verbose : bool
+        Print progress / selected-product summary.
     choose_first_timeseries : bool
-        If True, selects the earliest matching of matching pipelines.
+        If True, prefer the earliest time-series product when multiple rows
+        match.
+    use_cache : bool
+        If True (default), consult the local JSON cache before calling
+        ``product.download()``.  Set to False to force a fresh download.
 
     Returns
     -------
     product : lksearch.TESSSearch (single-row)
         A TESSSearch object containing exactly one selected product row.
-    df : pandas.DataFrame
-        Light curve table from the first table-like FITS extension.
+    raw_df : pd.DataFrame
+        Light-curve table read directly from the FITS BinTable extension.
+    std_df : pd.DataFrame
+        Standardized DataFrame via ``standardize_lc``.
 
     Raises
     ------
     ValueError
-        If no matching HLSP timeseries products are found for the requested pipeline.
+        If no matching HLSP timeseries product is found, or if the
+        download manifest is empty.
+
+    Notes
+    -----
+    Cache index is written to ``{downloadpath}/hlsp_fits_cache.json``.
+    A cache entry is invalidated automatically if the recorded file path
+    no longer exists on disk (stale entry).
+
+    Examples
+    --------
+    >>> product, raw_df, std_df = get_tess_lc(259377017, "QLP", Sector=3)
+    >>> product, raw_df, std_df = get_tess_lc(259377017, "QLP", Sector=3)
+    # Second call reads from cache — no download.
     """
     os.makedirs(downloadpath, exist_ok=True)
 
-    tic_str = str(TIC_ID).strip()
     # Normalize "123.0" -> "123" if user passed a float-like string
+    tic_str = str(TIC_ID).strip()
     try:
         tic_str = str(int(float(tic_str)))
     except Exception:
         pass
     
-    # lksearch treats float search_radius as arcseconds by default. :contentReference[oaicite:7]{index=7}
+    # lksearch treats float search_radius as arcseconds by default.
     search_radius = float(radius) if isinstance(radius, (int, float, np.floating)) else radius
 
-    # 1) Query
+    # 1) MAST search (always run — it is fast and determines which file
+    #  to serve from cache).   
     search = lk.TESSSearch(
         target=f"TIC {tic_str}",
         search_radius=search_radius,
@@ -267,21 +412,20 @@ def get_tess_lc(
     try:
         ts = search.timeseries
     except:
-        # Very defensive fallback; docs/tutorials show .timeseries exists. :contentReference[oaicite:8]{index=8}
+        # Very defensive fallback; docs/tutorials show .timeseries exists.
         ts = search
     
     # Filter to HLSP + pipeline (and keep exptime/sector constraints via ctor inputs)
     filtered = ts.filter_table(mission="HLSP", pipeline=pipeline)
 
     if filtered.table is None or len(filtered.table) == 0:
-        # Build helpful debug context from whatever we *did* get back
         table = getattr(ts, "table", None)
         if isinstance(table, pd.DataFrame) and len(table) > 0:
-            if "mission" in table.columns:
-                hlsp_tbl = table[table["mission"].astype(str).eq("HLSP")]
-            else:
-                hlsp_tbl = table
-
+            hlsp_tbl = (
+                table[table["mission"].astype(str).eq("HLSP")]
+                if "mission" in table.columns
+                else table
+            )
             avail = (
                 np.unique(hlsp_tbl["pipeline"].astype(str))
                 if "pipeline" in hlsp_tbl.columns and len(hlsp_tbl) > 0
@@ -289,60 +433,19 @@ def get_tess_lc(
             )
             raise ValueError(
                 f"No HLSP timeseries product found for pipeline='{pipeline}' "
-                f"(TIC={tic_str}, sector={Sector}, exptime={exptime}, radius={radius}). "
-                f"Available HLSP pipelines: {avail.tolist()}"
+                f"(TIC={tic_str}, sector={Sector}, exptime={exptime}, "
+                f"radius={radius}). Available HLSP pipelines: {avail.tolist()}"
             )
-
         raise ValueError(
-            f"No products returned at all for TIC={tic_str}, sector={Sector}, exptime={exptime}, radius={radius}."
+            f"No products returned at all for TIC={tic_str}, sector={Sector}, "
+            f"exptime={exptime}, radius={radius}."
         )
 
     tbl = filtered.table.copy()
 
-    # 3) Pick best row:
-    #    (a) prefer rows whose target_name contains the TIC id
-    #    (b) then smallest distance (closest on-sky match)
-    # NOTE: OLD VERSION
-    # if "target_name" in tbl.columns:
-    #     pat = re.compile(rf"(^|\D){re.escape(tic_str)}(\D|$)")
-    #     mask = tbl["target_name"].astype(str).apply(lambda s: bool(pat.search(s)))
-    #     if mask.any():
-    #         tbl = tbl[mask]
+    # 3) Row selection (identical logic to original) 
 
-    # if "distance" in tbl.columns:
-    #     tbl = tbl.sort_values("distance", ascending=True)
-
-    # best_tbl = tbl.iloc[[0]].reset_index(drop=True)
-
-    # 3) Modified for choose_first_timeseries
-    # Prefer rows whose target_name contains the TIC id
-    # if "target_name" in tbl.columns:
-    #     pat = re.compile(rf"(^|\D){re.escape(tic_str)}(\D|$)")
-    #     mask = tbl["target_name"].astype(str).apply(lambda s: bool(pat.search(s)))
-    #     if mask.any():
-    #         tbl = tbl.loc[mask].copy()
-
-    # # If requested, prefer the first/earliest time-series product (v.1)
-    # if choose_first_timeseries:
-    #     if "t_min" in tbl.columns:
-    #         tbl = tbl.sort_values(["t_min", "distance"] if "distance" in tbl.columns else ["t_min"],
-    #                             ascending=True)
-    #     elif "year" in tbl.columns:
-    #         tbl = tbl.sort_values(["year", "distance"] if "distance" in tbl.columns else ["year"],
-    #                             ascending=True)
-    #     elif "description" in tbl.columns:
-    #         tbl = tbl.sort_values("description", ascending=True)
-    #     elif "distance" in tbl.columns:
-    #         tbl = tbl.sort_values("distance", ascending=True)
-    # else:
-    #     if "distance" in tbl.columns:
-    #         tbl = tbl.sort_values("distance", ascending=True)
-    
-    # best_tbl = tbl.iloc[[0]].reset_index(drop=True)
-
-##########################################################################################
-   # NOTE: v2. choose earliest or nearest product for choose_first_timeseries (4/8)
-    sort_cols = []
+    sort_cols = List[str] = []
     time_col_used = None
 
     if choose_first_timeseries:
@@ -378,37 +481,68 @@ def get_tess_lc(
 
 
     # Create a single-row TESSSearch object so download() only pulls one file.
-    product = lk.TESSSearch(table=best_tbl)
+    product = _lk.TESSSearch(table=best_tbl)
 
     if verbose:
-        cols = [c for c in ["target_name", "pipeline", "mission", "sector", "exptime", "distance", "year", "description"] if c in best_tbl.columns]
+        cols = [
+            c for c in ["target_name", "pipeline", "mission", "sector", "exptime", 
+                        "distance", "year", "description"] 
+                        if c in best_tbl.columns
+            ]
         print("Selected product row:")
         print(best_tbl[cols] if cols else best_tbl.head(1))
 
         if choose_first_timeseries:
             print(f"choose_first_timeseries=True; sorted using: {time_col_used}")
 
-    # 4) Download
-    manifest = product.download(download_dir=downloadpath)
+    #  Cache lookup — skip download if FITS already on disk   
+    cache_key = _build_fits_cache_key(best_tbl, tic_str, pipeline, exptime)
+    local_path: Optional[str] = None
 
-    # 5) Extract local path robustly
-    if not isinstance(manifest, pd.DataFrame) or len(manifest) == 0:
-        raise ValueError("Download returned an empty manifest; nothing was downloaded.")
+    if use_cache:
+        cache_index = _load_fits_cache(downloadpath)
+        cached_path = cache_index.get(cache_key)
+        if cached_path and os.path.isfile(cached_path):
+            if verbose:
+                print(f"[cache hit]  {pipeline} TIC={tic_str} → {cached_path}")
+            local_path = cached_path
+        elif cached_path:
+            if verbose:
+                print(
+                    f"[cache stale] recorded path no longer exists: {cached_path}\n"
+                    f"              Re-downloading..."
+                )
 
-    # lksearch manifest uses 'Local Path' in tutorials. :contentReference[oaicite:9]{index=9}
-    path_col = None
-    for c in manifest.columns:
-        canon = c.lower().replace(" ", "").replace("_", "")
-        if canon in {"localpath"}:
-            path_col = c
-            break
+    # 4) Download (only if no valid cached path found)  
+    if local_path is None:
+        manifest = product.download(download_dir=downloadpath)
+
+        # 5) Extract local path robustly
+        if not isinstance(manifest, pd.DataFrame) or len(manifest) == 0:
+            raise ValueError("Download returned an empty manifest; nothing was downloaded.")
+
+    # lksearch manifest uses 'Local Path' in tutorials.
+    if path_col is None:
+        for c in manifest.columns:
+            canon = c.lower().replace(" ", "").replace("_", "")
+            if canon == "localpath":
+                path_col = c
+                break
 
     if path_col is None:
-        raise ValueError(f"Could not find Local Path column in manifest. Columns: {list(manifest.columns)}")
+        raise ValueError(
+            f"Could not find Local Path column in manifest. " 
+            f"Columns: {list(manifest.columns)}"
+        )
 
     local_path = str(manifest[path_col].iloc[0])
 
-    # 6) Read FITS, grab first table-like extension, convert to DataFrame
+    if use_cache:
+            _update_fits_cache(downloadpath, cache_key, local_path)
+            if verbose:
+                print(f"[cache write] {cache_key} → {local_path}")
+
+    # 6) Read FITS → DataFrame → standardize  
     with fits.open(local_path, memmap=False) as hdul:
         table_hdu = None
         for hdu in hdul[1:]:
@@ -417,14 +551,18 @@ def get_tess_lc(
                 continue
             # Prefer a named LIGHTCURVE extension if present; else first BinTable-like HDU
             extname = str(getattr(hdu, "name", "")).upper()
-            if hasattr(data, "names") and extname in {"LIGHTCURVE", "LIGHTCURVES", "LC", "TIME_SERIES", "TIMESERIES"}:
+            if hasattr(data, "names") and extname in {
+                "LIGHTCURVE", "LIGHTCURVES", "LC", "TIME_SERIES", "TIMESERIES"
+            }:
                 table_hdu = hdu
                 break
             if table_hdu is None and hasattr(data, "names"):
                 table_hdu = hdu
         
         if table_hdu is None:
-            raise ValueError(f"No table-like FITS extension found in fike: {local_path}")
+            raise ValueError(
+                f"No table-like FITS extension found in fike: {local_path}"
+            )
         
         rec = np.array(table_hdu.data)
 
@@ -436,16 +574,22 @@ def get_tess_lc(
                 # numpy>=2 compatibility path for newbyteorder changes
                 rec = rec.byteswap().view(rec.dtype.newbyteorder("="))
 
-        df = pd.DataFrame.from_records(rec)
-        
-        newdf = standardize_lc(df,pipeline)
+        raw_df = pd.DataFrame.from_records(rec)
+        new_df = standardize_lc(new_df, pipeline)
 
-        # 7) Sorting df (increasing values) - helper
-        #df = df.sort_values(by = 'time', ascending = True).reset_index(drop=True) # drops the old indices
-        #newdf = newdf.sort_values(by = 'time', ascending = True).reset_index(drop=True) # drops the old indices
+    return product, raw_df, new_df
 
-    return product, df, newdf
-
+# Persist / reload results from collect_lightcurves_for_target
+class _NumpyEncoder(json.JSONEncoder):
+    """JSON encoder that handles numpy scalar types from pandas/.item() calls."""
+    def default(self, o: Any) -> Any:
+        if isinstance(o, np.integer):
+            return int(o)
+        if isinstance(o, np.floating):
+            return float(o)
+        if isinstance(o, np.ndarray):
+            return o.tolist()
+        return super().default(o)
 
 # NOTE: Generate N distinct colors for plots!
 def _get_colors(num_colors):
@@ -456,6 +600,151 @@ def _get_colors(num_colors):
         saturation = (90 + np.random.rand() * 10)/100.
         colors.append(colorsys.hls_to_rgb(hue, lightness, saturation))
     return colors
+
+def normalize_standardized_lc(std_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalize all flux columns in a standardized LC DataFrame by their
+    per-sector nanmedian so that each flux type has a baseline of ~1.0.
+
+    Each flux column is divided by ``nanmedian`` of that column's finite
+    values.  The corresponding error column is divided by the **same**
+    median (preserving the signal-to-noise ratio).  Background flux is
+    normalized independently.
+
+    Normalization pairs
+    -------------------
+    ``flux_raw``  / ``flux_raw_err``   → divided by ``nanmedian(flux_raw)``
+    ``flux_corr`` / ``flux_corr_err``  → divided by ``nanmedian(flux_corr)``
+    ``flux_bkg``  / ``flux_bkg_err``   → divided by ``nanmedian(flux_bkg)``
+
+    Columns ``time`` and ``quality`` are left untouched.
+
+    Parameters
+    ----------
+    std_df : pd.DataFrame
+        Standardized DataFrame from ``standardize_lc``.  Expected columns:
+        ``time``, ``flux_raw``, ``flux_raw_err``, ``flux_corr``,
+        ``flux_corr_err``, ``flux_bkg``, ``flux_bkg_err``, ``quality``.
+
+    Returns
+    -------
+    out : pd.DataFrame
+        Copy of ``std_df`` with flux/error columns normalized in-place.
+        Returns the input unchanged if a median is zero, non-finite, or the
+        column is absent (safe no-op).
+
+    Notes
+    -----
+    - Normalization is computed only from finite values to guard against
+      NaN-dominated columns (common for pipelines that do not populate
+      certain flux types).
+    - A median of exactly 0.0 is treated as invalid and that pair is skipped.
+    - This function must be applied **per sector** before concatenation;
+      applying it to an already-concatenated multi-sector LC would
+      normalize across the joint baseline, defeating the purpose.
+
+    Examples
+    --------
+    >>> std_df = standardize_lc(raw_df, "QLP")
+    >>> std_norm = normalize_standardized_lc(std_df)
+    >>> float(np.nanmedian(std_norm["flux_corr"]))   # ≈ 1.0
+    1.0
+    """
+    NORM_PAIRS = [
+        ("flux_raw",  "flux_raw_err"),
+        ("flux_corr", "flux_corr_err"),
+        ("flux_bkg",  "flux_bkg_err"),
+    ]
+
+    out = std_df.copy()
+
+    for flux_col, err_col in NORM_PAIRS:
+        if flux_col not in out.columns:
+            continue
+
+        vals = out[flux_col].to_numpy(dtype=float)
+        finite_vals = vals[np.isfinite(vals)]
+
+        if finite_vals.size == 0:
+            continue  # entire column is NaN — nothing to normalize
+
+        median = np.nanmedian(finite_vals)
+
+        if not np.isfinite(median) or median == 0.0:
+            continue  # degenerate; leave column as-is
+
+        out[flux_col] = out[flux_col] / median
+
+        if err_col in out.columns:
+            out[err_col] = out[err_col] / median
+
+    return out
+
+# Full replacement: collect_lightcurves_for_target
+# (only change: normalize_standardized_lc called after standardize_lc)
+def _apply_quality_mask(std_df: pd.DataFrame, pipeline: str = "") -> pd.DataFrame:
+    """
+    Apply a quality mask to a standardized LC DataFrame and validate the result.
+
+    Mask logic
+    ----------
+    - All pipelines : ``quality == 0``
+    - TGLC          : ``quality == 0`` AND ``quality2 == 0``
+
+    ``quality2`` NaN values (non-TGLC pipelines) are filled with 0 so they
+    pass the secondary check unconditionally.
+
+    Parameters
+    ----------
+    std_df : pd.DataFrame
+        Normalized, standardized LC with at least a ``quality`` column.
+    pipeline : str, optional
+        Pipeline name used in error messages only.
+
+    Returns
+    -------
+    masked : pd.DataFrame
+        Subset of ``std_df`` where all quality flags are zero, index reset.
+
+    Raises
+    ------
+    ValueError
+        If any non-zero ``quality`` or ``quality2`` rows survive the mask.
+
+    Examples
+    --------
+    >>> masked = _apply_quality_mask(std_df, pipeline="TGLC")
+    >>> (masked["quality"]  == 0).all()
+    True
+    >>> (masked["quality2"] == 0).all()
+    True
+    """
+    q_mask = std_df["quality"] == 0
+
+    if "quality2" in std_df.columns:
+        q2 = pd.to_numeric(std_df["quality2"], errors="coerce").fillna(0)
+        q_mask = q_mask & (q2 == 0)
+
+    masked = std_df.loc[q_mask].reset_index(drop=True)
+
+    # Validation
+    bad_q = int((masked["quality"] != 0).sum())
+    if bad_q:
+        raise ValueError(
+            f"[{pipeline}] _apply_quality_mask: {bad_q} non-zero 'quality' "
+            f"rows survived the mask — check flag values."
+        )
+
+    if "quality2" in masked.columns:
+        q2_check = pd.to_numeric(masked["quality2"], errors="coerce").fillna(0)
+        bad_q2 = int((q2_check != 0).sum())
+        if bad_q2:
+            raise ValueError(
+                f"[{pipeline}] _apply_quality_mask: {bad_q2} non-zero 'quality2' "
+                f"rows survived the mask — check TESS_flags values."
+            )
+
+    return masked
 
 # Multi-pipeline wrapper 
 def collect_lightcurves_for_target(
@@ -692,3 +981,390 @@ def collect_lightcurves_for_target(
             }
 
     return results
+
+# NOTE: NEW
+def save_pipeline_results(
+    results: Dict[str, Dict[str, Any]],
+    savepath: str,
+    tic_id: Union[int, str],
+    sector: int,
+    *,
+    overwrite: bool = False,
+) -> str:
+    """
+    Persist the output of ``collect_lightcurves_for_target`` to disk.
+
+    Layout on disk::
+
+        {savepath}/
+          TIC{tic_id}_S{sector}/
+            metadata.json                    ← status, errors, row counts
+            {PIPELINE}_raw.parquet
+            {PIPELINE}_standardized.parquet
+            {PIPELINE}_standardized_masked.parquet
+
+    Parquet is used for DataFrames (fast I/O, exact dtype preservation).
+    ``None`` DataFrames (failed pipelines or disabled masking) are skipped
+    silently — their absence is recorded in ``metadata.json``.
+
+    Parameters
+    ----------
+    results : dict
+        As returned by ``collect_lightcurves_for_target``.
+    savepath : str
+        Root directory under which the ``TIC{id}_S{sector}/`` folder is
+        created.
+    tic_id : int | str
+        TIC identifier (used only for the folder name).
+    sector : int
+        Sector number (used only for the folder name).
+    overwrite : bool
+        If False (default) and the target directory already exists, raise
+        FileExistsError.  If True, existing files are overwritten silently.
+
+    Returns
+    -------
+    outdir : str
+        Absolute path to the ``TIC{tic_id}_S{sector}/`` directory.
+
+    Raises
+    ------
+    FileExistsError
+        If the output directory already exists and ``overwrite=False``.
+
+    Examples
+    --------
+    >>> outdir = save_pipeline_results(results, "/data/comparisons",
+    ...                                tic_id=259377017, sector=3)
+    >>> print(outdir)
+    /data/comparisons/TIC259377017_S3
+    """
+    outdir = os.path.join(savepath, f"TIC{tic_id}_S{sector}")
+    if os.path.exists(outdir) and not overwrite:
+        raise FileExistsError(
+            f"Output directory already exists: {outdir}\n"
+            "Pass overwrite=True to replace existing files."
+        )
+    os.makedirs(outdir, exist_ok=True)
+
+    metadata: Dict[str, Any] = {}
+
+    for pipeline, info in results.items():
+        meta_entry: Dict[str, Any] = {
+            "tic_id": str(info.get("tic_id", tic_id)),
+            "sector": info.get("sector", sector),
+            "pipeline": pipeline,
+            "status": info.get("status", "unknown"),
+            "error": info.get("error"),
+            "n_raw": info.get("n_raw"),
+            "n_standardized": info.get("n_standardized"),
+            "n_masked": info.get("n_masked"),
+            "files": {},
+        }
+
+        for key in ("raw", "standardized", "standardized_masked"):
+            df = info.get(key)
+            if df is not None and not df.empty:
+                fname = f"{pipeline}_{key}.parquet"
+                fpath = os.path.join(outdir, fname)
+                df.to_parquet(fpath, index=False)
+                meta_entry["files"][key] = fname
+
+        metadata[pipeline] = meta_entry
+
+    meta_path = os.path.join(outdir, "metadata.json")
+    with open(meta_path, "w") as fh:
+        json.dump(metadata, fh, indent=2, cls=_NumpyEncoder)
+
+    return outdir
+
+
+def load_pipeline_results(
+    savepath: str,
+    tic_id: Union[int, str],
+    sector: int,
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Reload a results dict previously saved by ``save_pipeline_results``.
+
+    Reconstructs the same structure as ``collect_lightcurves_for_target``
+    (minus the ``product`` field, which is not serialised).
+
+    Parameters
+    ----------
+    savepath : str
+        Root directory passed to ``save_pipeline_results``.
+    tic_id : int | str
+        TIC identifier.
+    sector : int
+        Sector number.
+
+    Returns
+    -------
+    results : dict
+        Keyed by pipeline name.  Each value has:
+        ``raw``, ``standardized``, ``standardized_masked`` (DataFrames or
+        None), plus all scalar metadata fields.  ``product`` is always None.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the expected directory or ``metadata.json`` is missing.
+
+    Examples
+    --------
+    >>> results = load_pipeline_results("/data/comparisons", 259377017, 3)
+    >>> results["QLP"]["standardized"].head()
+    """
+    outdir = os.path.join(savepath, f"TIC{tic_id}_S{sector}")
+    meta_path = os.path.join(outdir, "metadata.json")
+
+    if not os.path.isdir(outdir):
+        raise FileNotFoundError(f"Results directory not found: {outdir}")
+    if not os.path.isfile(meta_path):
+        raise FileNotFoundError(f"metadata.json not found in: {outdir}")
+
+    try:
+        with open(meta_path, "r") as fh:
+            metadata = json.load(fh)
+    except json.JSONDecodeError as exc:
+        raise FileNotFoundError(
+            f"metadata.json at {meta_path} is corrupt (truncated by a prior "
+            f"failed write). Treating as cache miss. Original error: {exc}\n"
+            f"The directory will be overwritten on next save."
+        ) from exc
+
+    results: Dict[str, Dict[str, Any]] = {}
+
+    for pipeline, meta in metadata.items():
+        entry: Dict[str, Any] = {
+            "product": None,  # not serialised
+            "raw": None,
+            "standardized": None,
+            "standardized_masked": None,
+            "tic_id": meta.get("tic_id"),
+            "sector": meta.get("sector"),
+            "pipeline": pipeline,
+            "n_raw": meta.get("n_raw"),
+            "n_standardized": meta.get("n_standardized"),
+            "n_masked": meta.get("n_masked"),
+            "status": meta.get("status"),
+            "error": meta.get("error"),
+        }
+
+        for key in ("raw", "standardized", "standardized_masked"):
+            fname = meta.get("files", {}).get(key)
+            if fname:
+                fpath = os.path.join(outdir, fname)
+                if os.path.isfile(fpath):
+                    entry[key] = pd.read_parquet(fpath)
+
+        results[pipeline] = entry
+
+    return results
+
+
+######
+def target_to_lightcurve_workflow_V2(
+    target,
+    pipelines,
+    target_Sector,
+    DEFAULT_RADIUS,
+    DEFAULT_CADENCE,
+    DEFAULT_DOWNLOADPATH,
+    *,
+    save_results: bool = True,
+    results_savepath: str = None,
+    force_redownload: bool = False,
+):
+    """
+    Phase-fold and compare TESS HLSP light curves across multiple pipelines
+    for a single target, with disk-backed caching of both FITS files and
+    standardized DataFrames.
+
+    On first call for a given (TIC, sector) pair, the function downloads all
+    requested pipelines via ``collect_lightcurves_for_target`` and optionally
+    persists the standardized results to Parquet on disk.  On subsequent
+    calls, it attempts to load results from disk — skipping all network I/O —
+    and only falls back to a live download if the saved data are not found.
+
+    Parameters
+    ----------
+    target : pd.Series or single-row pd.DataFrame
+        Row from the nearby TOI / M-dwarf catalog.  Must contain:
+        ``'TIC ID'``, ``'Orbital Period (days) Value'``,
+        ``'Orbital Epoch Value'``, ``'Transit Depth Value'``,
+        ``'Transit Duration (hours) Value'``, and ``'Sectors'``.
+    pipelines : list of str
+        Pipeline names to compare (e.g. ``["QLP", "TESS-SPOC", "TGLC",
+        "GSFC-ELEANOR-LITE"]``).
+    target_Sector : int or None
+        TESS sector to use.  If None, the first (earliest) sector listed in
+        ``target['Sectors']`` is selected automatically.
+    DEFAULT_RADIUS : astropy.units.Quantity
+        Cone-search radius passed to ``collect_lightcurves_for_target``.
+    DEFAULT_CADENCE : str
+        Cadence/exptime string passed to ``collect_lightcurves_for_target``.
+    DEFAULT_DOWNLOADPATH : str
+        Root directory for FITS downloads and the FITS cache index.
+    save_results : bool, optional
+        If True (default), persist standardized DataFrames to Parquet after a
+        live download run.  Has no effect when results are loaded from disk.
+    results_savepath : str or None, optional
+        Root directory for saved Parquet results.  Defaults to
+        ``DEFAULT_DOWNLOADPATH + "/saved_results"`` if not provided.
+    force_redownload : bool, optional
+        If True, skip the disk cache entirely and re-run
+        ``collect_lightcurves_for_target`` from scratch.  Useful when the
+        on-disk data are stale or a pipeline has been updated.
+
+    Returns
+    -------
+    sector_results : dict
+        The results dict as returned by ``collect_lightcurves_for_target``
+        (or reconstructed from disk by ``load_pipeline_results``).
+
+    Examples
+    --------
+    >>> target = nearby_TOI_MD_df.loc[
+    ...     nearby_TOI_MD_df['TIC ID'].astype(int) == 259377017
+    ... ].reset_index(drop=True).iloc[0]
+    >>> pipelines = ["QLP", "TESS-SPOC", "TGLC", "GSFC-ELEANOR-LITE"]
+    >>> pipeline_colors = _get_colors(len(pipelines))
+    >>> results = target_to_lightcurve_workflow(
+    ...     target=target,
+    ...     pipelines=pipelines,
+    ...     target_Sector=None,
+    ...     DEFAULT_RADIUS=DEFAULT_RADIUS,
+    ...     DEFAULT_CADENCE=DEFAULT_CADENCE,
+    ...     DEFAULT_DOWNLOADPATH=DEFAULT_DOWNLOADPATH,
+    ... )
+    """
+    import time as clock
+    import matplotlib.pyplot as plt
+    t_start = clock.time()
+    # ------------------------------------------------------------------ #
+    #  Unpack target metadata                                             #
+    # ------------------------------------------------------------------ #
+    ID          = target['TIC ID'].item()
+    target_P    = target['Orbital Period (days) Value'].item()
+    target_T0   = target['Orbital Epoch Value'].item()
+    target_Dep  = target['Transit Depth Value'].item() / 1e6
+    target_Dur  = target['Transit Duration (hours) Value'].item()
+
+    if target_Sector is None:
+        try:
+            target_Sector = np.min(
+                list(map(int, target['Sectors'].to_list()[0].split(',')))
+            )
+        except AttributeError:
+            target_Sector = np.min(
+                list(map(int, target['Sectors'].split(',')))
+            )
+
+    if results_savepath is None:
+        results_savepath = os.path.join(DEFAULT_DOWNLOADPATH, "saved_results")
+
+    # ------------------------------------------------------------------ #
+    #  Cache layer: try loading from disk first                           #
+    # ------------------------------------------------------------------ #
+    sector_results = None
+
+    if not force_redownload:
+        try:
+            sector_results = load_pipeline_results(
+                savepath=results_savepath,
+                tic_id=ID,
+                sector=target_Sector,
+            )
+            print(
+                f"[cache hit] Loaded saved results for TIC {ID}, "
+                f"sector {target_Sector} from {results_savepath}"
+            )
+        except FileNotFoundError:
+            print(
+                f"[cache miss] No saved results found for TIC {ID}, "
+                f"sector {target_Sector} — running live download."
+            )
+
+    # ------------------------------------------------------------------ #
+    #  Live download (first run, or force_redownload=True)               #
+    # ------------------------------------------------------------------ #
+    if sector_results is None:
+        sector_results = collect_lightcurves_for_target(
+            tic_id=ID,
+            sector=target_Sector,
+            pipelines=pipelines,
+            downloadpath=DEFAULT_DOWNLOADPATH,
+            radius=DEFAULT_RADIUS,
+            exptime=DEFAULT_CADENCE,
+            apply_quality_mask=True,
+            verbose=True,
+        )
+
+        if save_results:
+            try:
+                outdir = save_pipeline_results(
+                    results=sector_results,
+                    savepath=results_savepath,
+                    tic_id=ID,
+                    sector=target_Sector,
+                    overwrite=force_redownload,
+                )
+                print(f"[saved] Results written to {outdir}")
+            except FileExistsError:
+                # Results directory already exists and overwrite=False.
+                # This branch is only reachable if save_results=True but
+                # force_redownload=False and the saved dir exists without a
+                # readable metadata.json (edge case: partial prior write).
+                print(
+                    "[warning] Could not save results — directory exists. "
+                    "Pass force_redownload=True to overwrite."
+                )
+
+def timer(start,end,message):
+    """
+    Print the wall-clock runtime of a pipeline step in human-readable units.
+
+    Automatically selects seconds, minutes, or hours based on the elapsed
+    time so that log output is always legible regardless of step duration.
+    Designed for inline use at the end of each named pipeline step.
+
+    Parameters
+    ----------
+    start : float
+        Start timestamp in seconds, as returned by ``time.time()``.
+    end : float
+        End timestamp in seconds, as returned by ``time.time()``.
+    message : str
+        Label printed before the runtime, e.g. ``'SAP took:'``.
+
+    Returns
+    -------
+    None
+        Prints to stdout; does not return a value.
+
+    Notes
+    -----
+    Uses ``astropy.units`` for unit conversion.  Output format is:
+
+        ``<message> <value> seconds|minutes|hours``
+
+    The unit boundaries are: < 1 min → seconds; 1–60 min → minutes;
+    ≥ 60 min → hours.
+
+    Examples
+    --------
+    >>> import time
+    >>> t0 = time.time()
+    >>> # ... some computation ...
+    >>> timer(t0, time.time(), 'SAP took:')
+    SAP took: 4.231 seconds
+    """
+    runtime = (end-start)*u.second
+    if runtime.to(u.minute) < 1*u.minute:
+        print(message, np.round(runtime.value,3),'seconds \n')
+    if (runtime.to(u.minute) >= 1*u.minute) & (runtime.to(u.minute) < 60*u.minute):
+        print(message, np.round((runtime.to(u.minute)).value,3),'minutes \n')        
+    if (runtime.to(u.minute) >= 60*u.minute):
+        print(message, np.round((runtime.to(u.hour)).value,3),'hours \n')                
