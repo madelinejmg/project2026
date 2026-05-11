@@ -6,3 +6,14 @@ How do automated planet-vetting tools perform when applied to light curves produ
 Link to Dax's Google Drive (where data is stored as a .zip file. Zip file ~24 GB but uncompressed, the data is ~ 40 GB!!):
 [https://drive.google.com/drive/folders/1dE2YAE-RhTm0Ip1IXbZDaeAFX6Vmw2HA?usp=sharing](https://drive.google.com/drive/folders/1dE2YAE-RhTm0Ip1IXbZDaeAFX6Vmw2HA?usp=sharing)
 
+TICs_with_no_LCs = [22233480, 39926974, 261257684, 336961891, 203214081, 19028197, 
+                    150096001, 434226736, 165202476, 143032776, 324609476, 203289099,
+                    173103335, 95337971, 437054764, 4619242, 33397739, 126982221, 16005254,
+                    26054627, 39143128, 56798909, 458686847, 330637910, 388804061, 323687123,
+                    252481136, 459762279, 305506996, 258037656, 52005579, 288144647, 85281192,
+                    16550540, 443823169, 262470965, 291013124, 28872266, 63100069, 337217173,
+                    57147191 446166017, 22740615 282113152]
+
+TICs_with_T0_drift = [192833836, 111778581, 125405602, 243185500, 155867025, 230129753, 
+                      126606859, 335590096, 328513434, 168936945, 230982415, 67512645,
+                      77490011]
